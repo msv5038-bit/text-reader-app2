@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text Reader for Low Vision</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        #video {
+            width: 100%;
+            max-width: 640px;
+            border: 2px solid #333;
+            margin-bottom: 20px;
+        }
+        #canvas {
+            display: none;
+        }
+        button {
+            font-size: 1.2em;
+            padding: 10px 20px;
+            margin: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #output {
+            font-size: 1.5em;
+            margin-top: 20px;
+            padding: 20px;
+            background-color: white;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            max-width: 800px;
+            margin: 20px auto;
+            white-space: pre-wrap;
+        }
+        /* Accessibility enhancements */
+        body.high-contrast {
+            background-color: black;
+            color: yellow;
+        }
+        button.high-contrast {
+            background-color: yellow;
+            color: black;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+    <h1>Text Reader App</h1>
+    <p>This web app uses your iPhone's camera to scan printed text and read it aloud. Point the camera at the text and press "Scan and Read".</p>
+    
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+    
+    <button id="startCamera">Start Camera</button>
+    <button id="scan">Scan and Read</button>
+    <button id="toggleContrast">Toggle High Contrast</button>
+    
+    <div id="output">Scanned text will appear here...</div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const output = document.getElementById('output');
+        const startCameraBtn = document.getElementById('startCamera');
+        const scanBtn = document.getElementById('scan');
+        const toggleContrastBtn = document.getElementById('toggleContrast');
+        let stream;
+        let highContrast = false;
+
+        // Start camera
+        startCameraBtn.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+                startCameraBtn.disabled = true;
+                scanBtn.disabled = false;
+            } catch (err) {
+                alert('Error accessing camera: ' + err.message);
+            }
+        });
+
+        // Scan and read
+        scanBtn.addEventListener('click', async () => {
+            if (!video.srcObject) {
+                alert('Camera not started!');
+                return;
+            }
+
+            // Capture frame
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = canvas.toDataURL('image/png');
+
+            // OCR with Tesseract.js
+            output.textContent = 'Scanning...';
+            try {
+                const { data: { text } } = await Tesseract.recognize(imageData, 'eng', {
+                    logger: m => console.log(m)
+                });
+                output.textContent = text || 'No text detected.';
+                
+                // Read aloud
+                if ('speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.volume = 1;
+                    utterance.rate = 1;
+                    utterance.pitch = 1;
+                    speechSynthesis.speak(utterance);
+                } else {
+                    alert('Speech synthesis not supported in this browser.');
+                }
+            } catch (err) {
+                output.textContent = 'Error during OCR: ' + err.message;
+            }
+        });
+
+        // Toggle high contrast mode for low vision
+        toggleContrastBtn.addEventListener('click', () => {
+            highContrast = !highContrast;
+            document.body.classList.toggle('high-contrast', highContrast);
+            toggleContrastBtn.classList.toggle('high-contrast', highContrast);
+            scanBtn.classList.toggle('high-contrast', highContrast);
+            startCameraBtn.classList.toggle('high-contrast', highContrast);
+        });
+
+        // Stop stream on page unload
+        window.addEventListener('beforeunload', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        });
+    </script>
+</body>
+</html>
