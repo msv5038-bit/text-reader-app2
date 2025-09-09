@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Text and Object Reader for Low Vision</title>
+    <title>Enhanced Text and Object Reader for Low Vision</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -19,8 +19,13 @@
             margin-bottom: 20px;
             touch-action: pinch-zoom;
         }
-        #canvas {
+        #canvas, #overlay {
             display: none;
+            position: absolute;
+            pointer-events: none;
+        }
+        #overlay {
+            z-index: 10;
         }
         button {
             font-size: 1.2em;
@@ -46,6 +51,13 @@
         }
         #detectObject:hover {
             background-color: #218838;
+        }
+        #toggleContinuous {
+            background-color: #ffc107;
+            color: black;
+        }
+        #toggleContinuous:hover {
+            background-color: #e0a800;
         }
         #output {
             font-size: 1.5em;
@@ -74,17 +86,25 @@
             background-color: #55ff55;
             color: black;
         }
+        #toggleContinuous.high-contrast {
+            background-color: #ffff55;
+            color: black;
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.8.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+    <script src="https://docs.opencv.org/4.x/opencv.js"></script>
 </head>
 <body>
-    <h1>Text and Object Reader App</h1>
-    <p>Point the camera at printed text and press "Scan and Read" or at an object and press "Detect Object". Ensure good lighting.</p>
+    <h1>Enhanced Text and Object Reader App</h1>
+    <p>Point the camera at printed text to scan or at objects to detect. Ensure good lighting for accuracy.</p>
     
-    <video id="video" autoplay playsinline></video>
-    <canvas id="canvas"></canvas>
+    <div style="position: relative;">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay" width="640" height="480"></canvas> <!-- For bounding boxes -->
+    </div>
+    <canvas id="canvas" style="display: none;"></canvas>
     
     <label for="textType">Text Type:</label>
     <select id="textType">
@@ -94,7 +114,8 @@
     
     <button id="startCamera">Start Camera</button>
     <button id="scan">Scan and Read Text</button>
-    <button id="detectObject">Detect Object</button>
+    <button id="detectObject">Detect Objects</button>
+    <button id="toggleContinuous">Start Continuous Detection</button>
     <button id="stopSpeech">Stop Reading</button>
     <button id="toggleFlash">Turn On Flashlight</button>
     <button id="toggleContrast">Toggle High Contrast</button>
@@ -105,29 +126,38 @@
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
+        const overlay = document.getElementById('overlay');
         const output = document.getElementById('output');
         const startCameraBtn = document.getElementById('startCamera');
         const scanBtn = document.getElementById('scan');
         const detectObjectBtn = document.getElementById('detectObject');
+        const toggleContinuousBtn = document.getElementById('toggleContinuous');
         const stopSpeechBtn = document.getElementById('stopSpeech');
         const toggleFlashBtn = document.getElementById('toggleFlash');
         const toggleContrastBtn = document.getElementById('toggleContrast');
         let stream;
         let flashOn = false;
         let highContrast = false;
-        let mobilenetModel;
+        let cocoSsdModel;
+        let continuousDetection = false;
+        let detectionInterval;
 
-        // Load MobileNet model on page load
+        // Load Coco-SSD model on page load
         async function loadModel() {
             output.textContent = 'Loading object detection model...';
             try {
-                mobilenetModel = await mobilenet.load();
+                cocoSsdModel = await cocoSsd.load();
                 output.textContent = 'Model loaded. Ready to detect objects.';
             } catch (err) {
                 output.textContent = 'Error loading model: ' + err.message;
             }
         }
         loadModel();
+
+        // Wait for OpenCV.js to load
+        cv['onRuntimeInitialized'] = () => {
+            console.log('OpenCV.js loaded.');
+        };
 
         // Start camera with higher resolution
         startCameraBtn.addEventListener('click', async () => {
@@ -140,9 +170,12 @@
                     }
                 });
                 video.srcObject = stream;
+                overlay.width = video.videoWidth;
+                overlay.height = video.videoHeight;
                 startCameraBtn.disabled = true;
                 scanBtn.disabled = false;
                 detectObjectBtn.disabled = false;
+                toggleContinuousBtn.disabled = false;
                 stopSpeechBtn.disabled = false;
             } catch (err) {
                 alert('Error accessing camera: ' + err.message);
@@ -162,7 +195,7 @@
             }
         });
 
-        // Scan and read text
+        // Scan and read text with advanced preprocessing
         scanBtn.addEventListener('click', async () => {
             if (!video.srcObject) {
                 alert('Camera not started!');
@@ -176,26 +209,26 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                // Preprocess image for OCR
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const data = imageData.data;
-                for (let i = 0; i < data.length; i += 4) {
-                    const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                    data[i] = data[i + 1] = data[i + 2] = avg > 128 ? 255 : 0;
-                }
-                ctx.putImageData(imageData, 0, 0);
+                // Advanced preprocessing with OpenCV.js
+                let src = cv.imread(canvas);
+                let gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT); // Noise reduction
+                cv.adaptiveThreshold(gray, gray, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2); // Adaptive thresholding
+                cv.imshow('canvas', gray); // Update canvas with preprocessed image
+
                 const imageDataURL = canvas.toDataURL('image/png');
 
                 // OCR with Tesseract.js
                 output.textContent = 'Scanning text...';
                 try {
                     const psmMode = document.getElementById('textType').value;
-                    const { data: { text } } = await Tesseract.recognize(imageDataURL, 'eng', {
+                    const { data: { text, confidence } } = await Tesseract.recognize(imageDataURL, 'eng', {
                         logger: m => console.log(m),
                         tessedit_pageseg_mode: psmMode,
                         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?- '
                     });
-                    output.textContent = text || 'No text detected.';
+                    output.textContent = `${text || 'No text detected.'} (Confidence: ${confidence}%)`;
 
                     // Speak text
                     if ('speechSynthesis' in window) {
@@ -210,7 +243,7 @@
                             output.textContent = 'Speech error: ' + event.error;
                         };
                         utterance.onend = () => {
-                            output.textContent = text || 'No text detected.';
+                            output.textContent = `${text || 'No text detected.'} (Confidence: ${confidence}%)`;
                         };
                         speechSynthesis.speak(utterance);
                     } else {
@@ -218,58 +251,91 @@
                     }
                 } catch (err) {
                     output.textContent = 'Error during OCR: ' + err.message;
+                } finally {
+                    src.delete();
+                    gray.delete();
                 }
             }, 1000);
         });
 
-        // Detect object
-        detectObjectBtn.addEventListener('click', async () => {
-            if (!video.srcObject) {
-                alert('Camera not started!');
-                return;
-            }
-            if (!mobilenetModel) {
+        // Detect objects with Coco-SSD and draw bounding boxes
+        async function detectObjects() {
+            if (!cocoSsdModel) {
                 alert('Object detection model not loaded yet!');
                 return;
             }
 
-            output.textContent = 'Hold steady for object detection...';
-            setTimeout(async () => {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            try {
+                const predictions = await cocoSsdModel.detect(video);
+                const ctx = overlay.getContext('2d');
+                ctx.clearRect(0, 0, overlay.width, overlay.height);
+                overlay.style.display = 'block'; // Show overlay
 
-                // Use video frame directly for MobileNet
-                try {
-                    const predictions = await mobilenetModel.classify(video, 1); // Get top prediction
-                    const objectName = predictions[0]?.className || 'No object detected';
-                    const confidence = predictions[0]?.probability?.toFixed(2) || 0;
-                    output.textContent = `Object: ${objectName} (Confidence: ${confidence})`;
+                let detectedObjects = [];
+                predictions.forEach(prediction => {
+                    if (prediction.score > 0.5) { // Confidence threshold
+                        // Draw bounding box
+                        ctx.beginPath();
+                        ctx.rect(...prediction.bbox);
+                        ctx.lineWidth = 2;
+                        ctx.strokeStyle = highContrast ? 'yellow' : 'red';
+                        ctx.fillStyle = highContrast ? 'yellow' : 'red';
+                        ctx.stroke();
+                        ctx.font = '18px Arial';
+                        ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, prediction.bbox[0], prediction.bbox[1] > 10 ? prediction.bbox[1] - 5 : 10);
 
-                    // Speak object name
-                    if ('speechSynthesis' in window) {
-                        speechSynthesis.cancel();
-                        const utterance = new SpeechSynthesisUtterance(`Object detected: ${objectName}`);
-                        utterance.volume = 1;
-                        utterance.rate = 1;
-                        utterance.pitch = 1;
-                        const voices = speechSynthesis.getVoices();
-                        utterance.voice = voices.find(voice => voice.lang === 'en-US') || voices[0];
-                        utterance.onerror = (event) => {
-                            output.textContent = 'Speech error: ' + event.error;
-                        };
-                        utterance.onend = () => {
-                            output.textContent = `Object: ${objectName} (Confidence: ${confidence})`;
-                        };
-                        speechSynthesis.speak(utterance);
-                    } else {
-                        output.textContent = 'Speech synthesis not supported on this device.';
+                        detectedObjects.push(prediction.class);
                     }
-                } catch (err) {
-                    output.textContent = 'Error during object detection: ' + err.message;
+                });
+
+                const resultText = detectedObjects.length > 0 ? `Detected: ${detectedObjects.join(', ')}` : 'No objects detected.';
+                output.textContent = resultText;
+
+                // Speak results
+                if ('speechSynthesis' in window && detectedObjects.length > 0) {
+                    speechSynthesis.cancel();
+                    const utterance = new SpeechSynthesisUtterance(resultText);
+                    utterance.volume = 1;
+                    utterance.rate = 1;
+                    utterance.pitch = 1;
+                    const voices = speechSynthesis.getVoices();
+                    utterance.voice = voices.find(voice => voice.lang === 'en-US') || voices[0];
+                    utterance.onerror = (event) => {
+                        output.textContent = 'Speech error: ' + event.error;
+                    };
+                    utterance.onend = () => {
+                        output.textContent = resultText;
+                    };
+                    speechSynthesis.speak(utterance);
                 }
-            }, 1000);
+            } catch (err) {
+                output.textContent = 'Error during object detection: ' + err.message;
+            }
+        }
+
+        // Single detection
+        detectObjectBtn.addEventListener('click', () => {
+            if (!video.srcObject) {
+                alert('Camera not started!');
+                return;
+            }
+            output.textContent = 'Hold steady for object detection...';
+            setTimeout(detectObjects, 1000);
+        });
+
+        // Toggle continuous detection
+        toggleContinuousBtn.addEventListener('click', () => {
+            continuousDetection = !continuousDetection;
+            toggleContinuousBtn.textContent = continuousDetection ? 'Stop Continuous Detection' : 'Start Continuous Detection';
+            if (continuousDetection) {
+                detectionInterval = setInterval(detectObjects, 2000); // Every 2 seconds
+            } else {
+                clearInterval(detectionInterval);
+                const ctx = overlay.getContext('2d');
+                ctx.clearRect(0, 0, overlay.width, overlay.height);
+                overlay.style.display = 'none';
+                output.textContent = 'Continuous detection stopped.';
+            }
         });
 
         // Stop speech
@@ -290,6 +356,7 @@
             toggleFlashBtn.classList.toggle('high-contrast', highContrast);
             stopSpeechBtn.classList.toggle('high-contrast', highContrast);
             detectObjectBtn.classList.toggle('high-contrast', highContrast);
+            toggleContinuousBtn.classList.toggle('high-contrast', highContrast);
         });
 
         // Ensure voices are loaded
@@ -303,6 +370,7 @@
                 stream.getTracks().forEach(track => track.stop());
             }
             speechSynthesis.cancel();
+            if (continuousDetection) clearInterval(detectionInterval);
         });
     </script>
 </body>
