@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Text Reader for Low Vision</title>
+    <title>Text and Object Reader for Low Vision</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -35,6 +35,18 @@
         button:hover {
             background-color: #0056b3;
         }
+        #stopSpeech {
+            background-color: #dc3545;
+        }
+        #stopSpeech:hover {
+            background-color: #b02a37;
+        }
+        #detectObject {
+            background-color: #28a745;
+        }
+        #detectObject:hover {
+            background-color: #218838;
+        }
         #output {
             font-size: 1.5em;
             margin-top: 20px;
@@ -54,12 +66,22 @@
             background-color: yellow;
             color: black;
         }
+        #stopSpeech.high-contrast {
+            background-color: #ff5555;
+            color: black;
+        }
+        #detectObject.high-contrast {
+            background-color: #55ff55;
+            color: black;
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.8.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
 </head>
 <body>
-    <h1>Text Reader App</h1>
-    <p>Point the camera at printed text and press "Scan and Read". Ensure good lighting.</p>
+    <h1>Text and Object Reader App</h1>
+    <p>Point the camera at printed text and press "Scan and Read" or at an object and press "Detect Object". Ensure good lighting.</p>
     
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
@@ -71,11 +93,14 @@
     </select>
     
     <button id="startCamera">Start Camera</button>
-    <button id="scan">Scan and Read</button>
+    <button id="scan">Scan and Read Text</button>
+    <button id="detectObject">Detect Object</button>
+    <button id="stopSpeech">Stop Reading</button>
     <button id="toggleFlash">Turn On Flashlight</button>
     <button id="toggleContrast">Toggle High Contrast</button>
     
-    <div id="output">Scanned text will appear here...</div>
+    <p id="audioWarning" style="color: red;">No sound? Check silent mode, volume, or Bluetooth settings.</p>
+    <div id="output">Results will appear here...</div>
 
     <script>
         const video = document.getElementById('video');
@@ -83,11 +108,26 @@
         const output = document.getElementById('output');
         const startCameraBtn = document.getElementById('startCamera');
         const scanBtn = document.getElementById('scan');
+        const detectObjectBtn = document.getElementById('detectObject');
+        const stopSpeechBtn = document.getElementById('stopSpeech');
         const toggleFlashBtn = document.getElementById('toggleFlash');
         const toggleContrastBtn = document.getElementById('toggleContrast');
         let stream;
         let flashOn = false;
         let highContrast = false;
+        let mobilenetModel;
+
+        // Load MobileNet model on page load
+        async function loadModel() {
+            output.textContent = 'Loading object detection model...';
+            try {
+                mobilenetModel = await mobilenet.load();
+                output.textContent = 'Model loaded. Ready to detect objects.';
+            } catch (err) {
+                output.textContent = 'Error loading model: ' + err.message;
+            }
+        }
+        loadModel();
 
         // Start camera with higher resolution
         startCameraBtn.addEventListener('click', async () => {
@@ -102,6 +142,8 @@
                 video.srcObject = stream;
                 startCameraBtn.disabled = true;
                 scanBtn.disabled = false;
+                detectObjectBtn.disabled = false;
+                stopSpeechBtn.disabled = false;
             } catch (err) {
                 alert('Error accessing camera: ' + err.message);
             }
@@ -120,7 +162,7 @@
             }
         });
 
-        // Scan and read
+        // Scan and read text
         scanBtn.addEventListener('click', async () => {
             if (!video.srcObject) {
                 alert('Camera not started!');
@@ -134,18 +176,18 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                // Preprocess image
+                // Preprocess image for OCR
                 const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                 const data = imageData.data;
                 for (let i = 0; i < data.length; i += 4) {
                     const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                    data[i] = data[i + 1] = data[i + 2] = avg > 128 ? 255 : 0; // Grayscale and threshold
+                    data[i] = data[i + 1] = data[i + 2] = avg > 128 ? 255 : 0;
                 }
                 ctx.putImageData(imageData, 0, 0);
                 const imageDataURL = canvas.toDataURL('image/png');
 
                 // OCR with Tesseract.js
-                output.textContent = 'Scanning...';
+                output.textContent = 'Scanning text...';
                 try {
                     const psmMode = document.getElementById('textType').value;
                     const { data: { text } } = await Tesseract.recognize(imageDataURL, 'eng', {
@@ -154,21 +196,88 @@
                         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?- '
                     });
                     output.textContent = text || 'No text detected.';
-                    
-                    // Read aloud
+
+                    // Speak text
                     if ('speechSynthesis' in window) {
-                        const utterance = new SpeechSynthesisUtterance(text);
+                        speechSynthesis.cancel();
+                        const utterance = new SpeechSynthesisUtterance(text || 'No text detected.');
                         utterance.volume = 1;
                         utterance.rate = 1;
                         utterance.pitch = 1;
+                        const voices = speechSynthesis.getVoices();
+                        utterance.voice = voices.find(voice => voice.lang === 'en-US') || voices[0];
+                        utterance.onerror = (event) => {
+                            output.textContent = 'Speech error: ' + event.error;
+                        };
+                        utterance.onend = () => {
+                            output.textContent = text || 'No text detected.';
+                        };
                         speechSynthesis.speak(utterance);
                     } else {
-                        alert('Speech synthesis not supported.');
+                        output.textContent = 'Speech synthesis not supported on this device.';
                     }
                 } catch (err) {
                     output.textContent = 'Error during OCR: ' + err.message;
                 }
             }, 1000);
+        });
+
+        // Detect object
+        detectObjectBtn.addEventListener('click', async () => {
+            if (!video.srcObject) {
+                alert('Camera not started!');
+                return;
+            }
+            if (!mobilenetModel) {
+                alert('Object detection model not loaded yet!');
+                return;
+            }
+
+            output.textContent = 'Hold steady for object detection...';
+            setTimeout(async () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // Use video frame directly for MobileNet
+                try {
+                    const predictions = await mobilenetModel.classify(video, 1); // Get top prediction
+                    const objectName = predictions[0]?.className || 'No object detected';
+                    const confidence = predictions[0]?.probability?.toFixed(2) || 0;
+                    output.textContent = `Object: ${objectName} (Confidence: ${confidence})`;
+
+                    // Speak object name
+                    if ('speechSynthesis' in window) {
+                        speechSynthesis.cancel();
+                        const utterance = new SpeechSynthesisUtterance(`Object detected: ${objectName}`);
+                        utterance.volume = 1;
+                        utterance.rate = 1;
+                        utterance.pitch = 1;
+                        const voices = speechSynthesis.getVoices();
+                        utterance.voice = voices.find(voice => voice.lang === 'en-US') || voices[0];
+                        utterance.onerror = (event) => {
+                            output.textContent = 'Speech error: ' + event.error;
+                        };
+                        utterance.onend = () => {
+                            output.textContent = `Object: ${objectName} (Confidence: ${confidence})`;
+                        };
+                        speechSynthesis.speak(utterance);
+                    } else {
+                        output.textContent = 'Speech synthesis not supported on this device.';
+                    }
+                } catch (err) {
+                    output.textContent = 'Error during object detection: ' + err.message;
+                }
+            }, 1000);
+        });
+
+        // Stop speech
+        stopSpeechBtn.addEventListener('click', () => {
+            if ('speechSynthesis' in window) {
+                speechSynthesis.cancel();
+                output.textContent = 'Speech stopped.';
+            }
         });
 
         // Toggle high contrast mode
@@ -179,13 +288,21 @@
             scanBtn.classList.toggle('high-contrast', highContrast);
             startCameraBtn.classList.toggle('high-contrast', highContrast);
             toggleFlashBtn.classList.toggle('high-contrast', highContrast);
+            stopSpeechBtn.classList.toggle('high-contrast', highContrast);
+            detectObjectBtn.classList.toggle('high-contrast', highContrast);
         });
 
-        // Stop stream on page unload
+        // Ensure voices are loaded
+        window.speechSynthesis.onvoiceschanged = () => {
+            console.log('Voices loaded:', speechSynthesis.getVoices());
+        };
+
+        // Stop stream and speech on page unload
         window.addEventListener('beforeunload', () => {
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
             }
+            speechSynthesis.cancel();
         });
     </script>
 </body>
